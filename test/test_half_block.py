@@ -36,6 +36,36 @@ def bg(r, g, b):
     return f"\033[48;2;{r};{g};{b}m"
 
 
+def _reference_convert(bgr, quantize_bits=0):
+    """
+    The per-cell definition of a half-block frame, kept here so the vectorised
+    mapper has something independent to be checked against.
+    """
+    if bgr.shape[0] % 2:
+        bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+    rgb = bgr[:, :, ::-1]
+    if quantize_bits > 0:
+        rgb = (rgb >> quantize_bits) << quantize_bits
+    top, bottom = rgb[0::2], rgb[1::2]
+
+    lines = []
+    for row in range(top.shape[0]):
+        prev_fg = prev_bg = None
+        buf = []
+        for col in range(top.shape[1]):
+            top_px = tuple(int(v) for v in top[row, col])
+            bot_px = tuple(int(v) for v in bottom[row, col])
+            if top_px != prev_fg:
+                buf.append(fg(*top_px))
+                prev_fg = top_px
+            if bot_px != prev_bg:
+                buf.append(bg(*bot_px))
+                prev_bg = bot_px
+            buf.append("▀")
+        lines.append("".join(buf))
+    return RESET + (RESET + "\n").join(lines) + RESET
+
+
 class HalfBlockMapperTest(unittest.TestCase):
     def test_two_pixel_rows_become_one_line(self):
         # Input is BGR: top pixel red, bottom pixel blue.
@@ -70,6 +100,19 @@ class HalfBlockMapperTest(unittest.TestCase):
         frame = np.full((3, 1, 3), 100, dtype=np.uint8)
         out = HalfBlockMapper().convert(None, frame)
         self.assertIn(bg(0, 0, 0), out.split("\n")[-1])
+
+    def test_matches_the_per_cell_reference_implementation(self):
+        # The mapper builds a frame with NumPy rather than one f-string per
+        # cell; the escape layout must stay exactly what the loop produced.
+        rng = np.random.default_rng(7)
+        for shape in ((2, 1), (3, 1), (1, 3), (7, 5), (40, 60)):
+            for qb in (0, 2, 3):
+                frame = rng.integers(0, 256, (*shape, 3), dtype=np.uint8)
+                # A flat band so the run-length path is exercised too.
+                frame[: shape[0] // 2, : shape[1] // 2] = 77
+                with self.subTest(shape=shape, quantize_bits=qb):
+                    self.assertEqual(HalfBlockMapper(qb).convert(None, frame),
+                                     _reference_convert(frame, qb))
 
     def test_quantize_bits_drop_low_colour_bits(self):
         frame = np.full((2, 1, 3), 255, dtype=np.uint8)

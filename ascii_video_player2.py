@@ -45,7 +45,6 @@ def _force_utf8_output() -> None:
 _force_utf8_output()
 
 
-
 # ─────────────────────────────────────────────
 #  MODULE 1 ─ VideoDecoder
 # ─────────────────────────────────────────────
@@ -238,6 +237,11 @@ class HalfBlockMapper:
     _GLYPH = "\u2580"
     _RESET = "\033[0m"
 
+    # "0".."255", so the escape codes for a whole frame are assembled by NumPy
+    # instead of one Python f-string per cell. A 160x40 cell grid is 6400 cells
+    # per frame, far too many to format one at a time at 30 fps.
+    _DEC = np.array([str(v) for v in range(256)], dtype="U3")
+
     def __init__(self, quantize_bits: int = 0) -> None:
         self._qb = quantize_bits
 
@@ -255,32 +259,40 @@ class HalfBlockMapper:
 
         top    = rgb[0::2]
         bottom = rgb[1::2]
-        lines  = []
 
-        for row_idx in range(top.shape[0]):
-            fg_row = top[row_idx]
-            bg_row = bottom[row_idx]
-            prev_fg = prev_bg = None
-            buf = []
+        fg = self._escapes(top,    "\033[38;2;")
+        bg = self._escapes(bottom, "\033[48;2;")
 
-            for col_idx in range(fg_row.shape[0]):
-                fg = (int(fg_row[col_idx, 0]), int(fg_row[col_idx, 1]), int(fg_row[col_idx, 2]))
-                bg = (int(bg_row[col_idx, 0]), int(bg_row[col_idx, 1]), int(bg_row[col_idx, 2]))
+        # RLE: blank the escape wherever that half repeats the previous cell's
+        # colour. Column 0 stays False, so every line re-states both colours and
+        # a run never carries across a line break.
+        repeat = np.zeros(top.shape[:2], dtype=bool)
+        repeat[:, 1:] = np.all(top[:, 1:] == top[:, :-1], axis=2)
+        fg[repeat] = ""
+        repeat[:, 1:] = np.all(bottom[:, 1:] == bottom[:, :-1], axis=2)
+        bg[repeat] = ""
 
-                if fg != prev_fg:
-                    buf.append(f"\033[38;2;{fg[0]};{fg[1]};{fg[2]}m")
-                    prev_fg = fg
-                if bg != prev_bg:
-                    buf.append(f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m")
-                    prev_bg = bg
-
-                buf.append(self._GLYPH)
-
-            lines.append("".join(buf))
+        cells = np.char.add(np.char.add(fg, bg), self._GLYPH)
 
         # Reset at every line end so centring padding on the next line is not
         # painted with the last background colour.
-        return self._RESET + (self._RESET + "\n").join(lines) + self._RESET
+        return self._RESET + "\n".join(
+            "".join(row) + self._RESET for row in cells.tolist()
+        )
+
+    @classmethod
+    def _escapes(cls, px: np.ndarray, lead: str) -> np.ndarray:
+        """
+        True Color escape code for every pixel of an (H,W,3) RGB block.
+
+        :param lead: "\033[38;2;" for the foreground, "\033[48;2;" for the background.
+        :return:     shape=(H,W) unicode array of codes like "\033[38;2;12;34;56m".
+        """
+        dec = cls._DEC
+        add = np.char.add
+        return add(add(add(add(add(lead, dec[px[:, :, 0]]), ";"),
+                           dec[px[:, :, 1]]), ";"),
+                   add(dec[px[:, :, 2]], "m"))
 
 
 # ─────────────────────────────────────────────
