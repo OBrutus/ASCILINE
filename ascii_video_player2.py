@@ -23,6 +23,29 @@ import os
 os.system("")
 
 
+def _force_utf8_output() -> None:
+    """
+    Windows consoles come up on a legacy code page (cp1252, cp1254, ...) that
+    has no room for the \u2580 glyph half-block mode is built on, so --help and
+    every rendered frame would die with UnicodeEncodeError. Switch any stream
+    that cannot carry the glyph to UTF-8; errors="replace" leaves a stubborn
+    console printing "?" instead of raising. A pipe opened under an ASCII
+    locale hits the same wall, which is why this is not gated on win32.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            "\u2580".encode(getattr(stream, "encoding", None) or "ascii")
+        except (LookupError, UnicodeEncodeError):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
+
+
+_force_utf8_output()
+
+
+
 # ─────────────────────────────────────────────
 #  MODULE 1 ─ VideoDecoder
 # ─────────────────────────────────────────────

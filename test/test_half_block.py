@@ -22,6 +22,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ascii_video_player2
 from ascii_video_player2 import HalfBlockMapper, TerminalRenderer
 
 RESET = "\033[0m"
@@ -125,17 +126,64 @@ class TerminalRendererHalfBlockTest(unittest.TestCase):
         self.assertIn("\033[48;2;", text)
 
 
+class LegacyEncodingTest(unittest.TestCase):
+    """
+    The ▀ glyph reaches stdout both in --help and in every frame. On a Windows
+    console code page (cp1252, cp1254, ...) it cannot be encoded at all, which
+    used to abort the player with UnicodeEncodeError before anything was drawn.
+    """
+
+    class _Stream:
+        def __init__(self, encoding):
+            self.encoding = encoding
+            self.reconfigured = None
+
+        def reconfigure(self, **kwargs):
+            self.reconfigured = kwargs
+
+    def _run_guard(self, out, err):
+        with patch("sys.stdout", out), patch("sys.stderr", err):
+            ascii_video_player2._force_utf8_output()
+
+    def test_legacy_code_page_streams_are_switched_to_utf8(self):
+        out, err = self._Stream("cp1254"), self._Stream("cp1252")
+        self._run_guard(out, err)
+        expected = {"encoding": "utf-8", "errors": "replace"}
+        self.assertEqual(out.reconfigured, expected)
+        self.assertEqual(err.reconfigured, expected)
+
+    def test_streams_that_can_encode_the_glyph_are_left_alone(self):
+        out, err = self._Stream("utf-8"), self._Stream("utf-8")
+        self._run_guard(out, err)
+        self.assertIsNone(out.reconfigured)
+        self.assertIsNone(err.reconfigured)
+
+    def test_stream_without_reconfigure_is_skipped_quietly(self):
+        class Bare:
+            encoding = "ascii"
+
+        self._run_guard(Bare(), Bare())   # must not raise
+
+
 class HalfBlockCliTest(unittest.TestCase):
     PLAYER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "ascii_video_player2.py")
 
-    def _run(self, *args):
+    def _run(self, *args, **env):
         return subprocess.run([sys.executable, self.PLAYER, *args],
-                              capture_output=True, text=True, encoding="utf-8")
+                              capture_output=True, text=True, encoding="utf-8",
+                              env=dict(os.environ, **env) if env else None)
 
     def test_help_lists_half_block(self):
         result = self._run("--help")
         self.assertEqual(result.returncode, 0)
+        self.assertIn("--half-block", result.stdout)
+
+    def test_help_survives_a_legacy_stdout_encoding(self):
+        # Reproduces the Windows console failure on any platform: cp1254 has no
+        # code point for the ▀ in the --half-block help text.
+        result = self._run("--help", PYTHONIOENCODING="cp1254")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--half-block", result.stdout)
 
     def test_half_block_rejects_palette(self):
